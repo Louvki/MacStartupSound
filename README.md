@@ -1,7 +1,6 @@
 # MacStartupSound
 
-Inspired by https://github.com/yatinj30/MacMonium
-MacStartupSound is a macOS menu bar app that detects a MacBook lid opening gesture and plays a sound of your choice.
+Inspired by [MacMonium](https://github.com/yatinj30/MacMonium) MacStartupSound is a macOS menu bar app that detects a MacBook lid opening gesture and plays a sound of your choice.
 
 
 ## Features
