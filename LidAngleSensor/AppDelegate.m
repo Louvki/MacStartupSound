@@ -1,526 +1,478 @@
 //
 //  AppDelegate.m
-//  MacMonium
-//
-//  Created by Pranav Gawai on 2025-10-20.
+//  MacStartupSound
 //
 
 #import "AppDelegate.h"
-#import <CoreGraphics/CoreGraphics.h>
 
-// Key mapping (same as your previous mapping)
-const int kKeyToMidiNote[] = {
-    ['z'] = 48, ['s'] = 49, ['x'] = 50, ['d'] = 51, ['c'] = 52, ['v'] = 53,
-    ['g'] = 54, ['b'] = 55, ['h'] = 56, ['n'] = 57, ['j'] = 58, ['m'] = 59,
-    [','] = 60, ['l'] = 61, ['.'] = 62
-};
+#import <AVFoundation/AVFoundation.h>
+#import <QuartzCore/QuartzCore.h>
+
+#import "LidAngleSensor.h"
+
+static const double kArmBelowAngle = 70.0;
+static const double kLidThresholdAngle = 70.0;
+static const double kTriggerDeltaThreshold = 70.0;
+static const double kClosedWrapMinAngle = 300.0;
+static const NSTimeInterval kTriggerWindowSeconds = 1.5;
+static const NSTimeInterval kTriggerCooldownSeconds = 1.0;
+static const NSTimeInterval kPollingIntervalSeconds = 0.02;
+static const NSTimeInterval kMaxPlaybackSeconds = 10.0;
+static NSString * const kCustomSoundFileNameDefaultsKey = @"CustomSoundFileName";
+
+@interface AppDelegate ()
+
+@property (nonatomic, strong) LidAngleSensor *lidSensor;
+@property (nonatomic, strong) NSTimer *updateTimer;
+@property (nonatomic, strong) AVAudioPlayer *triggerPlayer;
+@property (nonatomic, strong) NSStatusItem *statusItem;
+@property (nonatomic, strong) NSMenuItem *angleMenuItem;
+@property (nonatomic, strong) NSMenuItem *soundToggleMenuItem;
+@property (nonatomic, strong) NSMenuItem *chooseSoundMenuItem;
+@property (nonatomic, strong) NSMenuItem *useDefaultSoundMenuItem;
+@property (nonatomic, assign) BOOL hasPreviousAngle;
+@property (nonatomic, assign) double previousAngle;
+@property (nonatomic, assign) BOOL soundEnabled;
+@property (nonatomic, assign) BOOL usingCustomSound;
+@property (nonatomic, copy) NSString *lastDebugEvent;
+@property (nonatomic, assign) double lastDelta;
+@property (nonatomic, assign) BOOL gestureArmed;
+@property (nonatomic, assign) double gestureStartAngle;
+@property (nonatomic, assign) CFTimeInterval gestureStartTime;
+@property (nonatomic, assign) double gestureDelta;
+@property (nonatomic, assign) CFTimeInterval gestureDuration;
+@property (nonatomic, assign) CFTimeInterval cooldownUntil;
+@property (nonatomic, assign) BOOL sampleTriggered;
+@property (nonatomic, assign) NSInteger triggerCount;
+@property (nonatomic, copy) dispatch_block_t stopPlaybackBlock;
+
+@end
 
 @implementation AppDelegate
 
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
-    // Window
-    NSRect frame = NSMakeRect(0, 0, 760, 420);
-    self.window = [[NSWindow alloc] initWithContentRect:frame
-                                              styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable)
-                                                backing:NSBackingStoreBuffered
-                                                  defer:NO];
-    self.window.title = @"MacMonium";
-    [self.window center];
-
-    // Content view
-    NSView *contentView = self.window.contentView;
-    contentView.wantsLayer = YES;
-
-    // Background gradient - Soft blue-gray theme
-    self.backgroundView = [[NSView alloc] initWithFrame:contentView.bounds];
-    self.backgroundView.wantsLayer = YES;
-    CAGradientLayer *grad = [CAGradientLayer layer];
-    grad.frame = self.backgroundView.bounds;
-    grad.colors = @[(id)[NSColor colorWithCalibratedRed:0.94 green:0.96 blue:0.98 alpha:1].CGColor,
-                    (id)[NSColor colorWithCalibratedRed:0.88 green:0.92 blue:0.96 alpha:1].CGColor];
-    grad.startPoint = CGPointMake(0, 0);
-    grad.endPoint = CGPointMake(1, 1);
-    self.backgroundView.layer = grad;
-    [contentView addSubview:self.backgroundView positioned:NSWindowBelow relativeTo:nil];
-    self.backgroundView.translatesAutoresizingMaskIntoConstraints = NO;
-    [NSLayoutConstraint activateConstraints:@[
-        [self.backgroundView.topAnchor constraintEqualToAnchor:contentView.topAnchor],
-        [self.backgroundView.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor],
-        [self.backgroundView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
-        [self.backgroundView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor]
-    ]];
-
-    // Title
-    self.titleField = [self createLabel:@"MacMonium" size:28 bold:YES];
-    [contentView addSubview:self.titleField];
-    self.titleField.translatesAutoresizingMaskIntoConstraints = NO;
-
-    // Angle / Air readout
-    self.angleField = [self createLabel:@"Air: --%" size:14 bold:NO];
-    [contentView addSubview:self.angleField];
-    self.angleField.translatesAutoresizingMaskIntoConstraints = NO;
-
-    // Scale selector
-    self.scalePopUp = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    self.scalePopUp.translatesAutoresizingMaskIntoConstraints = NO;
-    self.scalePopUp.wantsLayer = YES;
-    self.scalePopUp.bordered = YES;
-    self.scalePopUp.layer.borderWidth = 1.5;
-    self.scalePopUp.layer.borderColor = [NSColor colorWithCalibratedRed:0.3 green:0.4 blue:0.5 alpha:0.6].CGColor;
-    self.scalePopUp.layer.cornerRadius = 4;
-    [contentView addSubview:self.scalePopUp];
-
-    // Tone selector
-    self.tonePopUp = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    self.tonePopUp.translatesAutoresizingMaskIntoConstraints = NO;
-    self.tonePopUp.wantsLayer = YES;
-    self.tonePopUp.bordered = YES;
-    self.tonePopUp.layer.borderWidth = 1.5;
-    self.tonePopUp.layer.borderColor = [NSColor colorWithCalibratedRed:0.3 green:0.4 blue:0.5 alpha:0.6].CGColor;
-    self.tonePopUp.layer.cornerRadius = 4;
-    [self.tonePopUp addItemsWithTitles:@[@"Warm", @"Bright", @"Vintage"]];
-    [contentView addSubview:self.tonePopUp];
-
-    // Naming pop-up
-    self.namingPopUp = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    self.namingPopUp.translatesAutoresizingMaskIntoConstraints = NO;
-    self.namingPopUp.wantsLayer = YES;
-    self.namingPopUp.bordered = YES;
-    self.namingPopUp.layer.borderWidth = 1.5;
-    self.namingPopUp.layer.borderColor = [NSColor colorWithCalibratedRed:0.3 green:0.4 blue:0.5 alpha:0.6].CGColor;
-    self.namingPopUp.layer.cornerRadius = 4;
-    [self.namingPopUp addItemsWithTitles:@[@"Western", @"Sargam"]];
-    [self.namingPopUp setTarget:self];
-    [self.namingPopUp setAction:@selector(namingModeChanged:)];
-    [contentView addSubview:self.namingPopUp];
-
-    // Max air toggle
-    self.maxAirSwitch = [[NSButton alloc] initWithFrame:NSZeroRect];
-    self.maxAirSwitch.translatesAutoresizingMaskIntoConstraints = NO;
-    self.maxAirSwitch.buttonType = NSSwitchButton;
-    self.maxAirSwitch.title = @"Max Air";
-    self.maxAirSwitch.wantsLayer = YES;
-    [self.maxAirSwitch setTarget:self];
-    [self.maxAirSwitch setAction:@selector(maxAirToggled:)];
-    // Set black text color for Max Air switch
-    NSMutableParagraphStyle *style = [[NSMutableParagraphStyle alloc] init];
-    [style setAlignment:NSLeftTextAlignment];
-    NSDictionary *attrsDictionary = [NSDictionary dictionaryWithObjectsAndKeys:
-                                     [NSColor blackColor], NSForegroundColorAttributeName,
-                                     [NSFont systemFontOfSize:[NSFont systemFontSize]], NSFontAttributeName,
-                                     style, NSParagraphStyleAttributeName, nil];
-    NSAttributedString *attrString = [[NSAttributedString alloc]
-                                      initWithString:@"Max Air"
-                                      attributes:attrsDictionary];
-    [self.maxAirSwitch setAttributedTitle:attrString];
-    [contentView addSubview:self.maxAirSwitch];
-
-    // Air bar (progress) - wrapped in a container for border
-    NSView *airBarContainer = [[NSView alloc] initWithFrame:NSZeroRect];
-    airBarContainer.translatesAutoresizingMaskIntoConstraints = NO;
-    airBarContainer.wantsLayer = YES;
-    airBarContainer.layer.borderWidth = 1.5;
-    airBarContainer.layer.borderColor = [NSColor colorWithCalibratedRed:0.3 green:0.4 blue:0.5 alpha:0.6].CGColor;
-    airBarContainer.layer.cornerRadius = 5;
-    [contentView addSubview:airBarContainer];
-    
-    self.airBar = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
-    self.airBar.translatesAutoresizingMaskIntoConstraints = NO;
-    self.airBar.minValue = 0;
-    self.airBar.maxValue = 100;
-    self.airBar.doubleValue = 0;
-    self.airBar.indeterminate = NO;
-    self.airBar.controlSize = NSControlSizeRegular;
-    self.airBar.style = NSProgressIndicatorStyleBar;
-    [airBarContainer addSubview:self.airBar];
-
-    // Legend (note names)
-    self.legendField = [self createLabel:@"Loading..." size:12 bold:NO];
-    self.legendField.translatesAutoresizingMaskIntoConstraints = NO;
-    self.legendField.lineBreakMode = NSLineBreakByWordWrapping;
-    self.legendField.maximumNumberOfLines = 4;
-    [contentView addSubview:self.legendField];
-
-    // KeyCaptureView (handles key events)
-    self.keyView = [[KeyCaptureView alloc] initWithFrame:NSMakeRect(0, 0, frame.size.width, frame.size.height)];
-    self.keyView.delegate = self;
-    self.keyView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:self.keyView positioned:NSWindowAbove relativeTo:self.backgroundView];
-
-    // Visual keyboard - White keys with dark borders
-    self.keyButtons = [NSMutableArray array];
-    NSArray<NSString *> *whiteKeyLabels = @[@"Z",@"X",@"C",@"V",@"B",@"N",@"M", @",", @"L", @"."];
-    // We'll create 10 visual keys (positions)
-    CGFloat keyWidth = 48;
-    CGFloat keyHeight = 110;
-    CGFloat startX = 40;
-    CGFloat baseY = 120;
-    for (int i = 0; i < whiteKeyLabels.count; i++) {
-        NSButton *b = [[NSButton alloc] initWithFrame:NSMakeRect(startX + i * (keyWidth + 8), baseY, keyWidth, keyHeight)];
-        b.title = whiteKeyLabels[i];
-        b.bezelStyle = NSBezelStyleRegularSquare;
-        b.wantsLayer = YES;
-        b.layer.cornerRadius = 6;
-        b.layer.backgroundColor = [NSColor colorWithWhite:1.0 alpha:1.0].CGColor;
-        b.layer.borderWidth = 2.5;
-        b.layer.borderColor = [NSColor colorWithCalibratedRed:0.3 green:0.4 blue:0.5 alpha:0.7].CGColor;
-        b.tag = i; // index
-        b.enabled = NO; // purely visual, not clickable
-        [contentView addSubview:b];
-        b.translatesAutoresizingMaskIntoConstraints = NO;
-        [self.keyButtons addObject:b];
-    }
-
-    // Layout constraints
-    [NSLayoutConstraint activateConstraints:@[
-        [self.titleField.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:18],
-        [self.titleField.centerXAnchor constraintEqualToAnchor:contentView.centerXAnchor],
-
-        [self.angleField.topAnchor constraintEqualToAnchor:self.titleField.bottomAnchor constant:10],
-        [self.angleField.centerXAnchor constraintEqualToAnchor:contentView.centerXAnchor],
-
-        [self.scalePopUp.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:30],
-        [self.scalePopUp.topAnchor constraintEqualToAnchor:self.angleField.bottomAnchor constant:18],
-
-        [self.tonePopUp.leadingAnchor constraintEqualToAnchor:self.scalePopUp.trailingAnchor constant:16],
-        [self.tonePopUp.centerYAnchor constraintEqualToAnchor:self.scalePopUp.centerYAnchor],
-
-        [self.namingPopUp.leadingAnchor constraintEqualToAnchor:self.tonePopUp.trailingAnchor constant:16],
-        [self.namingPopUp.centerYAnchor constraintEqualToAnchor:self.tonePopUp.centerYAnchor],
-
-        [self.maxAirSwitch.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-30],
-        [self.maxAirSwitch.centerYAnchor constraintEqualToAnchor:self.scalePopUp.centerYAnchor],
-
-        [airBarContainer.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:30],
-        [airBarContainer.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-30],
-        [airBarContainer.topAnchor constraintEqualToAnchor:self.scalePopUp.bottomAnchor constant:18],
-        [airBarContainer.heightAnchor constraintEqualToConstant:14],
-        
-        [self.airBar.leadingAnchor constraintEqualToAnchor:airBarContainer.leadingAnchor constant:2],
-        [self.airBar.trailingAnchor constraintEqualToAnchor:airBarContainer.trailingAnchor constant:-2],
-        [self.airBar.topAnchor constraintEqualToAnchor:airBarContainer.topAnchor constant:2],
-        [self.airBar.bottomAnchor constraintEqualToAnchor:airBarContainer.bottomAnchor constant:-2],
-
-        [self.legendField.topAnchor constraintEqualToAnchor:airBarContainer.bottomAnchor constant:12],
-        [self.legendField.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:30],
-        [self.legendField.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-30],
-
-        // KeyView sits above everything clickable to capture key events
-        [self.keyView.topAnchor constraintEqualToAnchor:contentView.topAnchor],
-        [self.keyView.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor],
-        [self.keyView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
-        [self.keyView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor]
-    ]];
-
-    // Initialize core components
-    self.harmoniumEngine = [[HarmoniumAudioEngine alloc] init];
-    [self.harmoniumEngine startEngine];
+    (void)aNotification;
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
 
     self.lidSensor = [[LidAngleSensor alloc] init];
+    self.hasPreviousAngle = NO;
+    self.soundEnabled = YES;
+    self.usingCustomSound = NO;
+    self.lastDebugEvent = @"Boot";
+    self.lastDelta = 0.0;
+    self.gestureArmed = NO;
+    self.gestureStartAngle = 0.0;
+    self.gestureStartTime = 0.0;
+    self.gestureDelta = 0.0;
+    self.gestureDuration = 0.0;
+    self.cooldownUntil = 0.0;
+    self.sampleTriggered = NO;
+    self.triggerCount = 0;
+    [self prepareTriggerPlayer];
 
-    // Scales mapping and keys
-    [self setupScales];
+    [self buildStatusItem];
 
-    // Initial states
-    self.lastLidAngle = -1.0;
-    self.lastUpdateTime = CACurrentMediaTime();
-    self.airPressure = 0.0;
-    self.currentNamingMode = NoteNamingModeWestern;
-    [self.namingPopUp selectItemAtIndex:0];
-
-    // Set black text color for all popup buttons
-    [self setBlackTextColorForPopUpButton:self.scalePopUp];
-    [self setBlackTextColorForPopUpButton:self.tonePopUp];
-    [self setBlackTextColorForPopUpButton:self.namingPopUp];
-
-    // Initial legend
-    [self updateLegend];
-
-    // Timer for updates (50 Hz)
-    self.updateTimer = [NSTimer scheduledTimerWithTimeInterval:0.02 target:self selector:@selector(update) userInfo:nil repeats:YES];
-
-    // Menu / About
-    [self buildAboutMenu];
-
-    // show
-    [self.window makeKeyAndOrderFront:nil];
-    [self.window makeFirstResponder:self.keyView];
+    self.updateTimer = [NSTimer timerWithTimeInterval:kPollingIntervalSeconds
+                                               target:self
+                                             selector:@selector(updateLidState)
+                                             userInfo:nil
+                                              repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:self.updateTimer forMode:NSRunLoopCommonModes];
 }
 
-#pragma mark - UI helpers
-
-- (NSTextField *)createLabel:(NSString *)text size:(CGFloat)size bold:(BOOL)bold {
-    NSTextField *label = [[NSTextField alloc] initWithFrame:NSZeroRect];
-    label.stringValue = text;
-    label.editable = NO;
-    label.bordered = NO;
-    label.drawsBackground = NO;
-    label.alignment = NSTextAlignmentCenter;
-    label.textColor = [NSColor colorWithCalibratedRed:0.2 green:0.3 blue:0.4 alpha:1.0];
-    label.font = bold ? [NSFont boldSystemFontOfSize:size] : [NSFont systemFontOfSize:size];
-    return label;
-}
-
-- (void)setBlackTextColorForPopUpButton:(NSPopUpButton *)popUpButton {
-    NSArray *itemArray = [popUpButton itemArray];
-    NSDictionary *attributes = [NSDictionary dictionaryWithObjectsAndKeys:
-                                [NSColor blackColor], NSForegroundColorAttributeName,
-                                [NSFont systemFontOfSize:[NSFont systemFontSize]], NSFontAttributeName, nil];
-    
-    for (NSInteger i = 0; i < [itemArray count]; i++) {
-        NSMenuItem *item = [itemArray objectAtIndex:i];
-        NSAttributedString *as = [[NSAttributedString alloc]
-                                  initWithString:[item title]
-                                  attributes:attributes];
-        [item setAttributedTitle:as];
+- (void)buildStatusItem {
+    self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
+    self.statusItem.button.title = @"";
+    NSImage *statusIcon = nil;
+    if (@available(macOS 11.0, *)) {
+        statusIcon = [NSImage imageWithSystemSymbolName:@"laptopcomputer" accessibilityDescription:@"MacStartupSound"];
+    } else {
+        statusIcon = [NSImage imageNamed:NSImageNameComputer];
     }
+    statusIcon.template = YES;
+    self.statusItem.button.image = statusIcon;
+    self.statusItem.button.toolTip = @"MacStartupSound";
+
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"MacStartupSound"];
+
+    self.angleMenuItem = [[NSMenuItem alloc] initWithTitle:@"Angle: --"
+                                                    action:nil
+                                             keyEquivalent:@""];
+    self.angleMenuItem.enabled = NO;
+    [menu addItem:self.angleMenuItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    self.soundToggleMenuItem = [[NSMenuItem alloc] initWithTitle:@""
+                                                           action:@selector(toggleSound:)
+                                                    keyEquivalent:@""];
+    self.soundToggleMenuItem.target = self;
+    [menu addItem:self.soundToggleMenuItem];
+
+    self.chooseSoundMenuItem = [[NSMenuItem alloc] initWithTitle:@"Choose Custom Sound…"
+                                                          action:@selector(chooseCustomSound:)
+                                                   keyEquivalent:@""];
+    self.chooseSoundMenuItem.target = self;
+    [menu addItem:self.chooseSoundMenuItem];
+
+    self.useDefaultSoundMenuItem = [[NSMenuItem alloc] initWithTitle:@"Use Default Sound"
+                                                               action:@selector(useDefaultSound:)
+                                                        keyEquivalent:@""];
+    self.useDefaultSoundMenuItem.target = self;
+    [menu addItem:self.useDefaultSoundMenuItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:@"Quit"
+                                                       action:@selector(quitApp:)
+                                                keyEquivalent:@"q"];
+    quitItem.target = self;
+    [menu addItem:quitItem];
+
+    self.statusItem.menu = menu;
+    [self refreshSoundMenuTitle];
+    [self refreshStatusUIWithAngle:-1.0];
 }
 
-- (void)buildAboutMenu {
-    NSMenu *main = [NSApp mainMenu];
-    if (!main) {
-        main = [[NSMenu alloc] initWithTitle:@"MainMenu"];
-        [NSApp setMainMenu:main];
-    }
-    NSMenuItem *appMenuItem = [[NSMenuItem alloc] initWithTitle:@"MacMonium" action:NULL keyEquivalent:@""];
-    NSMenu *appSub = [[NSMenu alloc] initWithTitle:@"MacMonium"];
-    NSMenuItem *about = [[NSMenuItem alloc] initWithTitle:@"About MacMonium" action:@selector(showAbout:) keyEquivalent:@""];
-    about.target = self;
-    [appSub addItem:about];
-    [appMenuItem setSubmenu:appSub];
-    [main addItem:appMenuItem];
+- (void)refreshSoundMenuTitle {
+    NSString *sourceText = self.usingCustomSound ? @"Custom" : @"Default";
+    self.soundToggleMenuItem.title = self.soundEnabled
+        ? [NSString stringWithFormat:@"Sound: On (%@)", sourceText]
+        : [NSString stringWithFormat:@"Sound: Off (%@)", sourceText];
 }
 
-- (void)showAbout:(id)sender {
-    NSAlert *a = [[NSAlert alloc] init];
-    a.messageText = @"MacMonium";
-    a.informativeText = @"MacMonium — a digital harmonium that uses your MacBook hinge as bellows.\n\nBuilt by Pranav Gawai. Inspired by LidAngleSensor by Sam Henrigold.";
-    [a runModal];
+- (void)toggleSound:(id)sender {
+    (void)sender;
+    self.soundEnabled = !self.soundEnabled;
+    [self refreshSoundMenuTitle];
+    self.lastDebugEvent = self.soundEnabled ? @"Sound toggled ON" : @"Sound toggled OFF";
+    [self refreshStatusUIWithAngle:self.hasPreviousAngle ? self.previousAngle : -1.0];
 }
 
-#pragma mark - Scales and mapping
-
-- (void)setupScales {
-    self.availableScales = @[@"Chromatic", @"Major / Bilaval Thaat", @"Natural Minor", @"Kafi Thaat", @"Bhairavi Thaat", @"Minor Pentatonic"];
-    self.scaleNoteMapping = @{
-        @"Chromatic":             @[@0, @1, @2, @3, @4, @5, @6, @7, @8, @9, @10, @11],
-        @"Major / Bilaval Thaat": @[@0, @2, @4, @5, @7, @9, @11],
-        @"Natural Minor":         @[@0, @2, @3, @5, @7, @8, @10],
-        @"Kafi Thaat":            @[@0, @2, @3, @5, @7, @9, @10],
-        @"Bhairavi Thaat":        @[@0, @1, @3, @5, @7, @8, @10],
-        @"Minor Pentatonic":      @[@0, @3, @5, @7, @10]
-    };
-
-    [self.scalePopUp addItemsWithTitles:self.availableScales];
-    [self.scalePopUp setTarget:self];
-    [self.scalePopUp setAction:@selector(scaleChanged:)];
-    self.mappedKeys = @[@'z', @'s', @'x', @'d', @'c', @'v', @'g', @'b', @'h', @'n', @'j', @'m', @',', @'l', @'.'];
-    self.currentNamingMode = NoteNamingModeWestern;
+- (void)quitApp:(id)sender {
+    (void)sender;
+    [NSApp terminate:nil];
 }
 
-- (void)scaleChanged:(id)sender {
-    [self updateLegend];
-    // Reapply black text color after scale change
-    [self setBlackTextColorForPopUpButton:self.scalePopUp];
+- (void)prepareTriggerPlayer {
+    [self loadPreferredTriggerPlayer];
 }
 
-- (void)namingModeChanged:(id)sender {
-    self.currentNamingMode = (self.namingPopUp.indexOfSelectedItem == 1) ? NoteNamingModeSargam : NoteNamingModeWestern;
-    [self updateLegend];
-    // Reapply black text color after naming mode change
-    [self setBlackTextColorForPopUpButton:self.namingPopUp];
-}
+- (void)chooseCustomSound:(id)sender {
+    (void)sender;
+    NSOpenPanel *openPanel = [NSOpenPanel openPanel];
+    openPanel.canChooseFiles = YES;
+    openPanel.canChooseDirectories = NO;
+    openPanel.allowsMultipleSelection = NO;
+    openPanel.allowedFileTypes = @[@"mp3", @"m4a", @"wav", @"aiff"];
 
-- (void)maxAirToggled:(id)sender {
-    // Nothing heavy here. The update loop reads the state.
-}
-
-#pragma mark - Key events from KeyCaptureView delegate
-
-- (void)keyCaptureView:(KeyCaptureView *)view didReceiveKeyDown:(NSEvent *)event {
-    if (event.isARepeat) return;
-
-    NSString *s = event.charactersIgnoringModifiers.lowercaseString;
-    if (s.length == 0) return;
-    char ch = [s characterAtIndex:0];
-    int midi = [self getMidiNoteForKey:ch];
-    if (midi > 0) {
-        [self.harmoniumEngine playNote:midi];
-        [self highlightKeyForMidi:midi down:YES];
-    }
-}
-
-- (void)keyCaptureView:(KeyCaptureView *)view didReceiveKeyUp:(NSEvent *)event {
-    NSString *s = event.charactersIgnoringModifiers.lowercaseString;
-    if (s.length == 0) return;
-    char ch = [s characterAtIndex:0];
-    int midi = [self getMidiNoteForKey:ch];
-    if (midi > 0) {
-        [self.harmoniumEngine releaseNote:midi];
-        [self highlightKeyForMidi:midi down:NO];
-    }
-}
-
-#pragma mark - Visual key handling
-
-- (void)highlightKeyForMidi:(int)midi down:(BOOL)down {
-    // find index of mappedKeys matching midi note (closest)
-    for (int i = 0; i < self.mappedKeys.count && i < self.keyButtons.count; i++) {
-        char keyChar = [self.mappedKeys[i] charValue];
-        int mappedMidi = [self getMidiNoteForKey:keyChar];
-        if (mappedMidi == midi) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                NSButton *b = self.keyButtons[i];
-                if (down) {
-                    b.layer.backgroundColor = [NSColor colorWithCalibratedRed:0.3 green:0.7 blue:0.9 alpha:1].CGColor;
-                    b.layer.borderColor = [NSColor colorWithCalibratedRed:0.2 green:0.5 blue:0.7 alpha:1].CGColor;
-                } else {
-                    b.layer.backgroundColor = [NSColor colorWithWhite:1.0 alpha:1.0].CGColor;
-                    b.layer.borderColor = [NSColor colorWithCalibratedRed:0.3 green:0.4 blue:0.5 alpha:0.7].CGColor;
-                }
-            });
-            break;
-        }
-    }
-}
-
-#pragma mark - Update loop
-
-- (void)update {
-    double currentTime = CACurrentMediaTime();
-
-    // Read lid or fallback
-    BOOL sensorAvailable = self.lidSensor.isAvailable;
-    double angle = [self.lidSensor lidAngle];
-
-    if (!sensorAvailable && self.maxAirSwitch.state == NSControlStateValueOff) {
-        // sensor missing; show N/A and set air to 0
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self.angleField.stringValue = @"Sensor: N/A";
-            self.airBar.doubleValue = 0;
-        });
-        self.airPressure = 0.0;
-        [self.harmoniumEngine updateVolume:(float)self.airPressure];
-        self.lastUpdateTime = currentTime;
+    if ([openPanel runModal] != NSModalResponseOK || openPanel.URLs.count == 0) {
         return;
     }
 
-    if (self.maxAirSwitch.state == NSControlStateValueOn) {
-        self.airPressure = 1.0;
-    } else {
-        if (angle < 0) {
-            // read error; do nothing
+    NSError *copyError = nil;
+    if (![self installCustomSoundFromURL:openPanel.URLs.firstObject error:&copyError]) {
+        NSLog(@"[MacStartupSound] Failed to set custom sound: %@", copyError.localizedDescription);
+        self.lastDebugEvent = @"Failed to set custom sound";
+        [self refreshStatusUIWithAngle:self.hasPreviousAngle ? self.previousAngle : -1.0];
+        return;
+    }
+
+    [self loadPreferredTriggerPlayer];
+    self.lastDebugEvent = @"Loaded custom sound";
+    [self refreshStatusUIWithAngle:self.hasPreviousAngle ? self.previousAngle : -1.0];
+}
+
+- (void)useDefaultSound:(id)sender {
+    (void)sender;
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSString *storedName = [defaults stringForKey:kCustomSoundFileNameDefaultsKey];
+    if (storedName.length > 0) {
+        NSError *dirError = nil;
+        NSURL *appSupportDirectory = [self applicationSupportDirectoryURLCreatingIfNeeded:NO error:&dirError];
+        if (appSupportDirectory) {
+            NSURL *customFileURL = [appSupportDirectory URLByAppendingPathComponent:storedName];
+            [[NSFileManager defaultManager] removeItemAtURL:customFileURL error:nil];
+        }
+        [defaults removeObjectForKey:kCustomSoundFileNameDefaultsKey];
+    }
+
+    [self loadPreferredTriggerPlayer];
+    self.lastDebugEvent = @"Using default sound";
+    [self refreshStatusUIWithAngle:self.hasPreviousAngle ? self.previousAngle : -1.0];
+}
+
+- (BOOL)loadPlayerFromURL:(NSURL *)url {
+    NSError *error = nil;
+    AVAudioPlayer *player = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:&error];
+    if (error || !player) {
+        NSLog(@"[MacStartupSound] Failed to load sound at %@: %@", url.path, error.localizedDescription);
+        return NO;
+    }
+
+    self.triggerPlayer = player;
+    [self.triggerPlayer prepareToPlay];
+    return YES;
+}
+
+- (NSURL *)bundledDefaultSoundURL {
+    NSString *soundPath = [[NSBundle mainBundle] pathForResource:@"startup_sound" ofType:@"wav"];
+    if (soundPath.length == 0) {
+        return nil;
+    }
+    return [NSURL fileURLWithPath:soundPath];
+}
+
+- (NSURL *)applicationSupportDirectoryURLCreatingIfNeeded:(BOOL)create error:(NSError **)error {
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSURL *baseURL = [[fileManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask] firstObject];
+    if (!baseURL) {
+        return nil;
+    }
+
+    NSString *bundleName = [NSBundle mainBundle].bundleIdentifier ?: @"MacStartupSound";
+    NSURL *appSupportDirectory = [baseURL URLByAppendingPathComponent:bundleName isDirectory:YES];
+    if (create) {
+        if (![fileManager createDirectoryAtURL:appSupportDirectory
+                   withIntermediateDirectories:YES
+                                    attributes:nil
+                                         error:error]) {
+            return nil;
+        }
+    }
+    return appSupportDirectory;
+}
+
+- (NSURL *)customSoundURL {
+    NSString *storedName = [NSUserDefaults.standardUserDefaults stringForKey:kCustomSoundFileNameDefaultsKey];
+    if (storedName.length == 0) {
+        return nil;
+    }
+
+    NSError *dirError = nil;
+    NSURL *appSupportDirectory = [self applicationSupportDirectoryURLCreatingIfNeeded:NO error:&dirError];
+    if (!appSupportDirectory) {
+        return nil;
+    }
+
+    NSURL *customFileURL = [appSupportDirectory URLByAppendingPathComponent:storedName];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:customFileURL.path]) {
+        [NSUserDefaults.standardUserDefaults removeObjectForKey:kCustomSoundFileNameDefaultsKey];
+        return nil;
+    }
+    return customFileURL;
+}
+
+- (BOOL)installCustomSoundFromURL:(NSURL *)sourceURL error:(NSError **)error {
+    NSURL *appSupportDirectory = [self applicationSupportDirectoryURLCreatingIfNeeded:YES error:error];
+    if (!appSupportDirectory) {
+        return NO;
+    }
+
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSString *previousName = [defaults stringForKey:kCustomSoundFileNameDefaultsKey];
+    if (previousName.length > 0) {
+        NSURL *previousURL = [appSupportDirectory URLByAppendingPathComponent:previousName];
+        [[NSFileManager defaultManager] removeItemAtURL:previousURL error:nil];
+    }
+
+    NSString *extension = sourceURL.pathExtension.lowercaseString;
+    if (extension.length == 0) {
+        extension = @"mp3";
+    }
+    NSString *fileName = [NSString stringWithFormat:@"custom_sound.%@", extension];
+    NSURL *destinationURL = [appSupportDirectory URLByAppendingPathComponent:fileName];
+    [[NSFileManager defaultManager] removeItemAtURL:destinationURL error:nil];
+
+    if (![[NSFileManager defaultManager] copyItemAtURL:sourceURL toURL:destinationURL error:error]) {
+        return NO;
+    }
+
+    [defaults setObject:fileName forKey:kCustomSoundFileNameDefaultsKey];
+    return YES;
+}
+
+- (void)loadPreferredTriggerPlayer {
+    NSURL *customURL = [self customSoundURL];
+    if (customURL && [self loadPlayerFromURL:customURL]) {
+        self.usingCustomSound = YES;
+        return;
+    }
+
+    NSURL *defaultURL = [self bundledDefaultSoundURL];
+    if (defaultURL && [self loadPlayerFromURL:defaultURL]) {
+        self.usingCustomSound = NO;
+        return;
+    }
+
+    self.usingCustomSound = NO;
+    self.triggerPlayer = nil;
+    NSLog(@"[MacStartupSound] Missing bundled sound: startup_sound.wav");
+}
+
+- (void)updateLidState {
+    if (!self.lidSensor.isAvailable) {
+        self.sampleTriggered = NO;
+        self.lastDebugEvent = @"Sensor unavailable";
+        [self refreshStatusUIWithAngle:-1.0];
+        return;
+    }
+
+    double angle = [self.lidSensor lidAngle];
+    if (angle < 0) {
+        self.sampleTriggered = NO;
+        self.lastDebugEvent = @"Invalid lid read";
+        [self refreshStatusUIWithAngle:-1.0];
+        return;
+    }
+
+    CFTimeInterval now = CACurrentMediaTime();
+
+    if (angle >= kClosedWrapMinAngle) {
+        self.sampleTriggered = NO;
+        self.gestureArmed = NO;
+        self.gestureDelta = 0.0;
+        self.gestureDuration = 0.0;
+        self.lastDebugEvent = @"Ignored wrap/closed angle";
+        self.previousAngle = angle;
+        [self refreshStatusUIWithAngle:angle];
+        return;
+    }
+
+    if (!self.hasPreviousAngle) {
+        self.previousAngle = angle;
+        self.hasPreviousAngle = YES;
+        self.gestureArmed = (angle <= kArmBelowAngle);
+        self.gestureStartAngle = angle;
+        self.gestureStartTime = now;
+        self.lastDelta = 0.0;
+        self.gestureDelta = 0.0;
+        self.gestureDuration = 0.0;
+        self.sampleTriggered = NO;
+        self.lastDebugEvent = @"Primed first angle";
+        [self refreshStatusUIWithAngle:angle];
+        return;
+    }
+
+    double delta = fabs(angle - self.previousAngle);
+    self.lastDelta = delta;
+
+    if (now < self.cooldownUntil) {
+        self.sampleTriggered = NO;
+        self.lastDebugEvent = @"Cooldown";
+        self.previousAngle = angle;
+        [self refreshStatusUIWithAngle:angle];
+        return;
+    }
+
+    if (angle <= kArmBelowAngle) {
+        if (!self.gestureArmed) {
+            self.gestureArmed = YES;
+            self.gestureStartAngle = angle;
+            self.gestureStartTime = now;
+            self.lastDebugEvent = @"Armed";
+        } else if (angle < self.gestureStartAngle) {
+            self.gestureStartAngle = angle;
+            self.gestureStartTime = now;
+            self.lastDebugEvent = @"Armed lower baseline";
+        }
+    }
+
+    if (self.gestureArmed) {
+        self.gestureDuration = now - self.gestureStartTime;
+        self.gestureDelta = angle - self.gestureStartAngle;
+        if (self.gestureDelta < 0.0) {
+            self.gestureDelta = 0.0;
+        }
+
+        self.sampleTriggered = (angle > kLidThresholdAngle &&
+                                self.gestureDelta > kTriggerDeltaThreshold &&
+                                self.gestureDuration <= kTriggerWindowSeconds);
+
+        if (self.sampleTriggered) {
+            [self playTriggerSound];
+            self.gestureArmed = NO;
+            self.cooldownUntil = now + kTriggerCooldownSeconds;
+        } else if (self.gestureDuration > kTriggerWindowSeconds) {
+            self.gestureArmed = (angle <= kArmBelowAngle);
+            self.gestureStartAngle = angle;
+            self.gestureStartTime = now;
+            self.gestureDelta = 0.0;
+            self.gestureDuration = 0.0;
+            self.lastDebugEvent = @"Window expired";
+        } else if (angle <= kLidThresholdAngle) {
+            self.lastDebugEvent = @"Tracking opening gesture";
         } else {
-            if (self.lastLidAngle < 0) {
-                self.lastLidAngle = angle;
-                self.lastUpdateTime = currentTime;
-            } else {
-                double dt = currentTime - self.lastUpdateTime;
-                if (dt <= 0 || dt > 0.5) {
-                    self.lastLidAngle = angle;
-                    self.lastUpdateTime = currentTime;
-                } else {
-                    double instantVelocity = fabs(angle - self.lastLidAngle) / dt;
-                    double pumpFactor = 0.012;
-                    double smoothedVelocity = pow(instantVelocity, 0.85);
-                    self.airPressure += smoothedVelocity * pumpFactor;
-                    double decayRate = 0.45;
-                    self.airPressure -= decayRate * dt;
-                    if (self.airPressure < 0) self.airPressure = 0;
-                    if (self.airPressure > 1) self.airPressure = 1;
-
-                    self.lastLidAngle = angle;
-                    self.lastUpdateTime = currentTime;
-                }
-            }
+            self.lastDebugEvent = @"Above 90 but change/window not met";
         }
-    }
-
-    // process fades in engine
-    [self.harmoniumEngine processFadesWithDeltaTime:(currentTime - self.lastUpdateTime)];
-
-    // Update audio engine volume
-    [self.harmoniumEngine updateVolume:(float)self.airPressure];
-
-    // Update UI
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self.airBar.doubleValue = self.airPressure * 100.0;
-        self.angleField.stringValue = [NSString stringWithFormat:@"Air: %.0f%%", self.airPressure * 100.0];
-    });
-
-    // keep lastUpdateTime reasonable
-    if (self.maxAirSwitch.state == NSControlStateValueOff) {
-        self.lastUpdateTime = currentTime;
     } else {
-        self.lastUpdateTime = currentTime;
+        self.sampleTriggered = NO;
+        self.gestureDelta = 0.0;
+        self.gestureDuration = 0.0;
+        self.lastDebugEvent = @"Waiting to arm (close lid below 70)";
     }
+
+    self.previousAngle = angle;
+    [self refreshStatusUIWithAngle:angle];
 }
 
-#pragma mark - Legend+note mapping
-
-- (void)updateLegend {
-    NSMutableString *s = [NSMutableString stringWithString:@"Mapping: "];
-    for (int i = 0; i < self.mappedKeys.count && i < 10; i++) {
-        char ch = [self.mappedKeys[i] charValue];
-        int midi = [self getMidiNoteForKey:ch];
-        NSString *name = [self noteNameForMidi:midi];
-        [s appendFormat:@"%c:%@  ", toupper(ch), name];
-    }
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self.legendField.stringValue = s;
-    });
-}
-
-- (int)getMidiNoteForKey:(char)key {
-    int base = kKeyToMidiNote[(int)key];
-    if (base == 0) return -1;
-    NSString *currentScale = self.scalePopUp.selectedItem.title;
-    if ([currentScale isEqualToString:@"Chromatic"] || self.scaleNoteMapping[currentScale] == nil) {
-        return base;
-    } else {
-        NSArray<NSNumber *> *intervals = self.scaleNoteMapping[currentScale];
-        int root = 48; // C3
-        int best = base;
-        int minDist = INT_MAX;
-        for (int oct = -1; oct <= 2; oct++) {
-            for (NSNumber *iv in intervals) {
-                int cand = root + iv.intValue + oct * 12;
-                int dist = abs(cand - base);
-                if (dist < minDist) {
-                    minDist = dist;
-                    best = cand;
-                }
-            }
+- (void)playTriggerSound {
+    if (!self.triggerPlayer || !self.soundEnabled) {
+        if (!self.triggerPlayer) {
+            self.lastDebugEvent = @"Blocked: player not loaded";
+        } else {
+            self.lastDebugEvent = @"Blocked: sound toggle OFF";
         }
-        return best;
+        return;
     }
-}
 
-- (NSString *)noteNameForMidi:(int)midiNote {
-    if (midiNote < 0) return @"-";
-    if (self.currentNamingMode == NoteNamingModeSargam) {
-        NSArray *sargam = @[@"Sa", @"re", @"Re", @"ga", @"Ga", @"Ma", @"MA", @"Pa", @"dha", @"Dha", @"ni", @"Ni"];
-        int root = 48;
-        int interval = (midiNote - root) % 12;
-        if (interval < 0) interval += 12;
-        NSString *name = sargam[interval];
-        int oct = midiNote / 12;
-        if (oct < 4) return [NSString stringWithFormat:@"%@̣", name];
-        if (oct > 4) return [NSString stringWithFormat:@"%@̇", name];
-        return name;
+    self.triggerPlayer.currentTime = 0;
+    BOOL played = [self.triggerPlayer play];
+    if (played) {
+        if (self.stopPlaybackBlock) {
+            dispatch_block_cancel(self.stopPlaybackBlock);
+            self.stopPlaybackBlock = nil;
+        }
+        __block dispatch_block_t stopBlock = nil;
+        __weak typeof(self) weakSelf = self;
+        stopBlock = dispatch_block_create(0, ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf || strongSelf.stopPlaybackBlock != stopBlock) {
+                return;
+            }
+            if (strongSelf.triggerPlayer.isPlaying) {
+                [strongSelf.triggerPlayer stop];
+                strongSelf.lastDebugEvent = @"Stopped playback at 10s";
+                [strongSelf refreshStatusUIWithAngle:strongSelf.hasPreviousAngle ? strongSelf.previousAngle : -1.0];
+            }
+            strongSelf.stopPlaybackBlock = nil;
+        });
+        self.stopPlaybackBlock = stopBlock;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kMaxPlaybackSeconds * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(),
+                       stopBlock);
+
+        self.triggerCount += 1;
+        self.lastDebugEvent = @"Played trigger sound";
     } else {
-        NSArray *names = @[@"C", @"C#", @"D", @"D#", @"E", @"F", @"F#", @"G", @"G#", @"A", @"A#", @"B"];
-        int octave = (midiNote / 12) - 1;
-        NSString *n = names[midiNote % 12];
-        return [NSString stringWithFormat:@"%@%d", n, octave];
+        self.lastDebugEvent = @"Play call failed";
     }
 }
 
-#pragma mark - Clean up
+- (void)refreshStatusUIWithAngle:(double)angle {
+    NSString *angleText = (angle < 0) ? @"--" : [NSString stringWithFormat:@"%.1f", angle];
+    self.angleMenuItem.title = [NSString stringWithFormat:@"Angle: %@", angleText];
+    [self refreshSoundMenuTitle];
+}
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
+    (void)notification;
+    if (self.stopPlaybackBlock) {
+        dispatch_block_cancel(self.stopPlaybackBlock);
+        self.stopPlaybackBlock = nil;
+    }
     [self.updateTimer invalidate];
-    [self.harmoniumEngine stopEngine];
+    [self.lidSensor stopLidAngleUpdates];
 }
 
 @end
