@@ -4,7 +4,7 @@ Inspired by [MacMonium](https://github.com/yatinj30/MacMonium) MacStartupSound i
 
 ## How to run
 
-Compile the project using XCode and then run the app. You can add the app to your "Login items" so it starts up when you boot your mac. 
+Compile the project using XCode and then run the app. You can move the app to the "Applications" folder and then add the app to your "Login items" so it starts up when you boot your mac. 
 
 
 ## Features
